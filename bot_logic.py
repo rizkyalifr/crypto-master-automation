@@ -1,32 +1,12 @@
-import streamlit as st
+import os
+import time
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
 import requests
 from datetime import datetime
 import pytz
 
-# --- KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="Market Sniper Automation", page_icon="🦅", layout="wide")
-
-# --- CSS FIX ---
-st.markdown("""
-<style>
-    [data-testid="stMetricValue"] { font-size: 24px; }
-    .report-text { 
-        font-family: 'Courier New', monospace; 
-        white-space: pre-wrap; 
-        background-color: #f0f2f6; 
-        padding: 15px; 
-        border-radius: 10px; 
-        color: #000000; 
-        border: 1px solid #ccc;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# --- KONFIGURASI ASET (MENU PILIHAN) ---
+# --- KONFIGURASI ASET ---
 ASSETS = {
     "GOLD (PAXG)": "PAXG-USD",
     "BITCOIN (BTC)": "BTC-USD",
@@ -38,7 +18,7 @@ ASSETS = {
 # --- KONFIGURASI ENGINE ---
 INTERVAL = "1h"
 PERIOD = "1mo"
-SPREAD_AJAIB = 1.015 # Estimasi Spread Exchange Lokal
+SPREAD_AJAIB = 1.015 
 
 # --- HELPER FORMATTING ---
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
@@ -48,26 +28,25 @@ def fmt_usd(val): return f"${val:,.2f}"
 def add_manual_indicators(df):
     df = df.copy()
     
-    # 1. MACD (12, 26, 9)
+    # 1. MACD
     k = df['Close'].ewm(span=12, adjust=False, min_periods=12).mean()
     d = df['Close'].ewm(span=26, adjust=False, min_periods=26).mean()
     df['MACD'] = k - d
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False, min_periods=9).mean()
     
-    # 2. Bollinger Bands (20, 2)
+    # 2. Bollinger Bands
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
-    df['BBU'] = df['SMA20'] + (df['STD20'] * 2) # Upper
-    df['BBL'] = df['SMA20'] - (df['STD20'] * 2) # Lower
+    df['BBU'] = df['SMA20'] + (df['STD20'] * 2)
+    df['BBL'] = df['SMA20'] - (df['STD20'] * 2)
     
-    # 3. Stochastic RSI (14, 14, 3, 3)
+    # 3. Stochastic RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Hitung Stoch
     min_rsi = df['RSI'].rolling(window=14).min()
     max_rsi = df['RSI'].rolling(window=14).max()
     stoch_rsi = (df['RSI'] - min_rsi) / (max_rsi - min_rsi)
@@ -76,70 +55,58 @@ def add_manual_indicators(df):
     
     return df
 
-# --- FUNGSI GET DATA (DYNAMIC) ---
-@st.cache_data(ttl=300)
+# --- GET DATA ENGINE ---
 def get_data_engine(ticker_code):
-    # Download Ticker Pilihan + IDR
-    tickers_to_fetch = [ticker_code, "IDR=X"]
-    df = yf.download(tickers_to_fetch, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False, threads=False)
-    
     try:
-        # 1. Ambil Data Aset Utama
+        tickers_to_fetch = [ticker_code, "IDR=X"]
+        df = yf.download(tickers_to_fetch, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False, threads=False)
+        
         if isinstance(df.columns, pd.MultiIndex):
             main_data = df[ticker_code].dropna()
         else:
-            main_data = df # Fallback
-            
-        # 🔥 LOGIKA KALIBRASI KHUSUS 🔥
+            main_data = df 
+
+        # 🔥 KALIBRASI KHUSUS PAXG 🔥
         if ticker_code == "PAXG-USD":
             main_data = main_data * 0.99048968
         
-        # 2. Ambil Kurs IDR
         if isinstance(df.columns, pd.MultiIndex):
             kurs_raw = df['IDR=X']['Close'].dropna()
         else:
-             kurs_raw = pd.Series([16800])
-
+            kurs_raw = pd.Series([16800])
+        
         kurs = kurs_raw.iloc[-1] if not kurs_raw.empty else 16800
+        return main_data, kurs
 
     except Exception as e:
-        st.error(f"Error Data Fetching: {e}")
+        print(f"❌ Error fetching {ticker_code}: {e}")
         return pd.DataFrame(), 16800
-        
-    if kurs < 10000: kurs = 16800
-    return main_data, kurs
 
-# --- FIBONACCI EXTENDED (PETA BAWAH TANAH) ---
 def calculate_fibonacci_levels(df):
     if df.empty: return {}
     high = df['High'].max()
     low = df['Low'].min()
     diff = high - low
-    
-    levels = {
+    return {
         "MOONBAG (1.618)": high + (diff * 0.618),
         "RESISTANCE (High)": high,
         "GOLDEN POCKET (0.618)": high - (diff * 0.618),
         "FLOOR (Low)": low,
-        # 👇 LEVEL BAHAYA BARU 👇
-        "BEAR TRAP (1.272)": high - (diff * 1.272),
-        "CRASH BOTTOM (1.618)": high - (diff * 1.618)
+        "BEAR TRAP (1.272)": high - (diff * 1.272),   # Level Bawah Tanah 1
+        "CRASH BOTTOM (1.618)": high - (diff * 1.618) # Level Bawah Tanah 2
     }
-    return levels
 
-def send_telegram_alert(token, chat_id, message):
-    if not token or not chat_id: return False, "Token/ID Kosong"
+def send_telegram(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    params = {"chat_id": chat_id, "text": message}
     try:
-        r = requests.get(url, params=params)
-        return (True, "Sukses") if r.status_code == 200 else (False, r.text)
+        requests.get(url, params={"chat_id": chat_id, "text": message})
+        print("✅ Pesan Terkirim!")
     except Exception as e:
-        return False, str(e)
+        print(f"❌ Gagal Kirim: {e}")
 
-# --- LOGIC ANALYSIS & REPORT ---
+# --- ANALISA & GENERATE REPORT ---
 def generate_analysis_report(df, kurs, asset_name):
-    if df.empty: return "Data Kosong/Error", df, {}, df.iloc[-1] if not df.empty else None
+    if df.empty: return None, "WAIT / HOLD"
 
     # Analisa Indikator
     df = add_manual_indicators(df)
@@ -161,20 +128,12 @@ def generate_analysis_report(df, kurs, asset_name):
     elif stoch_k < 20: res_stoch = ("⚪ WAIT", "Oversold")
     else: res_stoch = ("⚪ NEUTRAL", f"{stoch_k:.1f}")
     
-    # MACD
-    if last_row['MACD'] > last_row['MACD_Signal']: res_macd = ("🟢 BULLISH", "Trend Naik")
-    else: res_macd = ("🔴 BEARISH", "Trend Turun")
-    
-    # VPVR
-    if last_row['Close'] > poc: res_vpvr = ("🟢 STRONG", "Above POC")
-    else: res_vpvr = ("🔴 WEAK", "Below POC")
-    
     # Bollinger
     if last_row['Close'] <= last_row['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
     elif last_row['Close'] >= last_row['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
 
-    # >>> 🔥 FIBONACCI STATUS LOGIC 🔥 <<<
+    # --- FIBONACCI STATUS ---
     current_price = last_row['Close']
     target_buy = fib_levels["GOLDEN POCKET (0.618)"]
     target_sell = fib_levels["RESISTANCE (High)"]
@@ -193,12 +152,11 @@ def generate_analysis_report(df, kurs, asset_name):
     else: 
         res_fib = ("🟢 BELOW", "Discount Area")
     
+    # --- DECISION LOGIC (UPDATED WITH NEAR BOTTOM) ---
     decision = "WAIT / HOLD"
     validation = "Market sideways."
     decision_tolerance = current_price * 0.002 
 
-    # >>> 🔥 DECISION LOGIC (FULL VERSION) 🔥 <<<
-    
     # 1. KONDISI NORMAL (Di atas Lantai)
     if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + decision_tolerance) and (current_price > target_floor):
         decision = "🔵 BUY / LONG"
@@ -214,7 +172,6 @@ def generate_analysis_report(df, kurs, asset_name):
         
     # 2. KONDISI NEW LOW (JEBOL LANTAI)
     elif current_price < target_floor:
-        # Cek Bear Trap (1.272)
         if (current_price <= target_trap + decision_tolerance) and (res_stoch[0] == "🟢 BULLISH" or stoch_k < 10):
              decision = "🔪 SPECULATIVE BUY (CATCH KNIFE)"
              validation = "⚠️ EXTREME: Pantulan Dead Cat Bounce di 1.272."
@@ -222,14 +179,14 @@ def generate_analysis_report(df, kurs, asset_name):
              decision = "💀 FREE FALL / WAIT"
              validation = "⛔ BAHAYA: Mencari Dasar Baru (Price Discovery)."
     
-    # 3. 🔥 KONDISI NEAR BOTTOM (Watchlist) 🔥
-    # Jika harga di atas Floor TAPI jaraknya kurang dari 1.5%
+    # >>> 🔥 FITUR BARU: WATCHLIST NEAR BOTTOM 🔥 <<<
+    # Aktif jika harga di atas Floor tapi kurang dari 1.5% jaraknya
     elif (current_price > target_floor) and (current_price <= target_floor * 1.015):
         decision = "👀 WATCHLIST: NEAR BOTTOM"
         validation = "📉 Harga mendekati Support Kuat. Pantau pantulan (Double Bottom)."
 
-    # 4. KONDISI CUT LOSS (Jika tidak masuk kriteria di atas)
-    elif current_price < (target_buy - (decision_tolerance * 2)):
+    # 4. KONDISI CUT LOSS (Antara Golden Pocket dan Floor, tapi jauh dari Floor)
+    elif current_price < (target_buy - (decision_tolerance * 2)) and current_price > target_floor:
         decision = "🛑 CUT LOSS / STOP BUY"
         validation = "⚠️ INVALID: Jebol Support Kuat."
 
@@ -262,9 +219,7 @@ def generate_analysis_report(df, kurs, asset_name):
 
 🎯 MAPPING AREA TERDEKAT
 """
-    # Menambahkan Level Bawah Tanah ke Laporan
     levels_sorted = ["MOONBAG (1.618)", "RESISTANCE (High)", "GOLDEN POCKET (0.618)", "FLOOR (Low)", "BEAR TRAP (1.272)", "CRASH BOTTOM (1.618)"]
-    
     for name in levels_sorted:
         val_usd = fib_levels[name]
         val_idr = val_usd * kurs * SPREAD_AJAIB
@@ -280,82 +235,40 @@ def generate_analysis_report(df, kurs, asset_name):
         elif "CRASH BOTTOM" in name: report += "\n   👉 [KIAMAT] Dasar terdalam."
         report += "\n"
 
-    return report, df, fib_levels, last_row
+    return report, decision
 
-# --- SIDEBAR (INPUT & MENU) ---
-st.sidebar.title("🦅 Market Sniper")
+# --- MAIN LOOP ---
+if __name__ == "__main__":
+    print("🤖 MARKET SNIPER STARTED...")
+    try:
+        TOKEN = os.environ["TELEGRAM_TOKEN"]
+        CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+    except:
+        print("❌ Secret Token Hilang!")
+        exit()
 
-# MENU PILIH ASET
-selected_asset_name = st.sidebar.selectbox(
-    "Pilih Aset Analisa:",
-    list(ASSETS.keys())
-)
-selected_ticker = ASSETS[selected_asset_name]
+    for name, ticker in ASSETS.items():
+        try:
+            print(f"🔍 Analyzing {name}...")
+            main_df, kurs_val = get_data_engine(ticker)
+            
+            if main_df.empty:
+                print(f"❌ Data {name} Kosong.")
+                continue
 
-st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Konfigurasi Bot")
+            report_text, decision = generate_analysis_report(main_df, kurs_val, name)
+            print(f"   👉 Result: {decision}")
 
-if "TELEGRAM_TOKEN" in st.secrets:
-    bot_token = st.secrets["TELEGRAM_TOKEN"]
-    chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-    st.sidebar.success("✅ Login via Secrets")
-else:
-    bot_token = st.sidebar.text_input("Bot Token", type="password")
-    chat_id = st.sidebar.text_input("Chat ID")
-
-# --- MAIN APP LOGIC ---
-st.title(f"🦅 {selected_asset_name} Automation")
-
-with st.spinner(f"Sedang Menganalisis {selected_asset_name}..."):
-    # Panggil Engine dengan Ticker Pilihan
-    main_df, kurs_val = get_data_engine(selected_ticker)
-    
-    if main_df.empty:
-        st.error(f"Gagal mengambil data {selected_asset_name}. Coba refresh.")
-    else:
-        # Generate Report dengan parameter dinamis
-        final_report, df_processed, fib_levels, last_row = generate_analysis_report(main_df, kurs_val, selected_asset_name)
-
-        # --- SIDEBAR METRICS ---
-        st.sidebar.markdown("---")
-        st.sidebar.header("💰 Live Price")
-        st.sidebar.metric("Kurs USD/IDR", fmt_idr(kurs_val))
-        
-        est_local = last_row['Close'] * kurs_val * SPREAD_AJAIB
-        st.sidebar.metric(f"{selected_asset_name.split()[0]}/IDR (Est)", fmt_idr(est_local))
-        st.sidebar.metric(f"{selected_asset_name.split()[0]}/USD", fmt_usd(last_row['Close']))
-
-        # --- CHART ---
-        st.subheader(f"📊 Chart {selected_asset_name} + Fibonacci Extension")
-        fig = go.Figure(data=[go.Candlestick(x=df_processed.index,
-                        open=df_processed['Open'], high=df_processed['High'],
-                        low=df_processed['Low'], close=df_processed['Close'],
-                        name=selected_asset_name)])
-        
-        # Warna khusus untuk level baru
-        colors = {
-            "MOONBAG": "lime", "RESISTANCE": "red", 
-            "GOLDEN POCKET": "gold", "FLOOR": "white",
-            "BEAR TRAP": "orange", "CRASH BOTTOM": "maroon"
-        }
-        for label, val in fib_levels.items():
-            c = "gray"
-            for k, v in colors.items():
-                if k in label: c = v
-            fig.add_hline(y=val, line_dash="dash", line_color=c, 
-                          annotation_text=f"{label} : ${val:.2f}", 
-                          annotation_position="top right")
-        
-        fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-        # --- REPORT SECTION ---
-        st.subheader("📋 Laporan Analisis Lengkap")
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if st.button(f"📩 Kirim {selected_asset_name} ke Tele"):
-                success, msg = send_telegram_alert(bot_token, chat_id, final_report)
-                if success: st.success("Terkirim!")
-                else: st.error(f"Gagal: {msg}")
-
-        st.text_area("Output Logika:", value=final_report, height=600, label_visibility="collapsed")
+            # FILTER KIRIM TELEGRAM
+            # Tambahkan "WATCHLIST" ke daftar yang harus dikirim
+            # if any(x in decision for x in ["BUY", "SELL", "CUT LOSS", "WATCHLIST", "FREE FALL", "SPECULATIVE"]):
+            print(f"🚀 MENGIRIM ALERT {name}...")
+            send_telegram(TOKEN, CHAT_ID, report_text)
+            time.sleep(2) 
+            # else:
+            #     pass 
+                
+        except Exception as e:
+            print(f"❌ Error pada {name}: {e}")
+            
+    print("✅ Selesai Scan Semua Aset.")
