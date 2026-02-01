@@ -174,7 +174,7 @@ def generate_analysis_report(df, kurs, asset_name):
     elif last_row['Close'] >= last_row['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
 
-    # >>> 🔥 FIBONACCI STATUS LOGIC (UPDATED) 🔥 <<<
+    # >>> 🔥 FIBONACCI STATUS LOGIC 🔥 <<<
     current_price = last_row['Close']
     target_buy = fib_levels["GOLDEN POCKET (0.618)"]
     target_sell = fib_levels["RESISTANCE (High)"]
@@ -197,7 +197,7 @@ def generate_analysis_report(df, kurs, asset_name):
     validation = "Market sideways."
     decision_tolerance = current_price * 0.002 
 
-    # >>> 🔥 DECISION LOGIC (CRASH HANDLER) 🔥 <<<
+    # >>> 🔥 DECISION LOGIC (FULL VERSION) 🔥 <<<
     
     # 1. KONDISI NORMAL (Di atas Lantai)
     if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + decision_tolerance) and (current_price > target_floor):
@@ -221,9 +221,15 @@ def generate_analysis_report(df, kurs, asset_name):
         else:
              decision = "💀 FREE FALL / WAIT"
              validation = "⛔ BAHAYA: Mencari Dasar Baru (Price Discovery)."
-             
-    # 3. KONDISI CUT LOSS (Antara Golden Pocket dan Floor)
-    elif current_price < (target_buy - (decision_tolerance * 2)) and current_price > target_floor:
+    
+    # 3. 🔥 KONDISI NEAR BOTTOM (Watchlist) 🔥
+    # Jika harga di atas Floor TAPI jaraknya kurang dari 1.5%
+    elif (current_price > target_floor) and (current_price <= target_floor * 1.015):
+        decision = "👀 WATCHLIST: NEAR BOTTOM"
+        validation = "📉 Harga mendekati Support Kuat. Pantau pantulan (Double Bottom)."
+
+    # 4. KONDISI CUT LOSS (Jika tidak masuk kriteria di atas)
+    elif current_price < (target_buy - (decision_tolerance * 2)):
         decision = "🛑 CUT LOSS / STOP BUY"
         validation = "⚠️ INVALID: Jebol Support Kuat."
 
@@ -326,10 +332,11 @@ with st.spinner(f"Sedang Menganalisis {selected_asset_name}..."):
                         low=df_processed['Low'], close=df_processed['Close'],
                         name=selected_asset_name)])
         
+        # Warna khusus untuk level baru
         colors = {
             "MOONBAG": "lime", "RESISTANCE": "red", 
             "GOLDEN POCKET": "gold", "FLOOR": "white",
-            "BEAR TRAP": "orange", "CRASH BOTTOM": "maroon" # Warna Baru
+            "BEAR TRAP": "orange", "CRASH BOTTOM": "maroon"
         }
         for label, val in fib_levels.items():
             c = "gray"
