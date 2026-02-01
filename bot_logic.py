@@ -55,46 +55,53 @@ def add_manual_indicators(df):
     
     return df
 
-# --- GET DATA ENGINE ---
+# --- GET DATA ENGINE (SAMA DENGAN APP.PY) ---
 def get_data_engine(ticker_code):
     try:
         tickers_to_fetch = [ticker_code, "IDR=X"]
         df = yf.download(tickers_to_fetch, period=PERIOD, interval=INTERVAL, group_by='ticker', progress=False, threads=False)
         
+        # 1. Ambil Data Aset Utama
         if isinstance(df.columns, pd.MultiIndex):
             main_data = df[ticker_code].dropna()
         else:
-            main_data = df 
+            main_data = df # Fallback
 
-        # 🔥 KALIBRASI KHUSUS PAXG 🔥
+        # 🔥 LOGIKA KALIBRASI KHUSUS 🔥
         if ticker_code == "PAXG-USD":
             main_data = main_data * 0.99048968
         
+        # 2. Ambil Kurs IDR
         if isinstance(df.columns, pd.MultiIndex):
             kurs_raw = df['IDR=X']['Close'].dropna()
         else:
             kurs_raw = pd.Series([16800])
         
         kurs = kurs_raw.iloc[-1] if not kurs_raw.empty else 16800
+        
         return main_data, kurs
 
     except Exception as e:
         print(f"❌ Error fetching {ticker_code}: {e}")
         return pd.DataFrame(), 16800
 
+# --- FIBONACCI EXTENDED (PETA BAWAH TANAH) ---
 def calculate_fibonacci_levels(df):
     if df.empty: return {}
     high = df['High'].max()
     low = df['Low'].min()
     diff = high - low
-    return {
+    
+    levels = {
         "MOONBAG (1.618)": high + (diff * 0.618),
         "RESISTANCE (High)": high,
         "GOLDEN POCKET (0.618)": high - (diff * 0.618),
         "FLOOR (Low)": low,
-        "BEAR TRAP (1.272)": high - (diff * 1.272),   # Level Bawah Tanah 1
-        "CRASH BOTTOM (1.618)": high - (diff * 1.618) # Level Bawah Tanah 2
+        # 👇 LEVEL BAHAYA BARU 👇
+        "BEAR TRAP (1.272)": high - (diff * 1.272),
+        "CRASH BOTTOM (1.618)": high - (diff * 1.618)
     }
+    return levels
 
 def send_telegram(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -104,14 +111,14 @@ def send_telegram(token, chat_id, message):
     except Exception as e:
         print(f"❌ Gagal Kirim: {e}")
 
-# --- ANALISA & GENERATE REPORT ---
-def generate_analysis_report(df, kurs, asset_name):
+# --- ANALISA & GENERATE REPORT (FULL CLONE APP.PY) ---
+def generate_bot_report(df, kurs, asset_name):
     if df.empty: return None, "WAIT / HOLD"
 
     # Analisa Indikator
     df = add_manual_indicators(df)
     
-    # VPVR Logic
+    # VPVR Logic (Manual Calculation for Bot)
     price_bins = pd.cut(df['Close'], bins=50)
     vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
     poc = vpvr.idxmax().mid
@@ -128,12 +135,20 @@ def generate_analysis_report(df, kurs, asset_name):
     elif stoch_k < 20: res_stoch = ("⚪ WAIT", "Oversold")
     else: res_stoch = ("⚪ NEUTRAL", f"{stoch_k:.1f}")
     
+    # MACD
+    if last_row['MACD'] > last_row['MACD_Signal']: res_macd = ("🟢 BULLISH", "Trend Naik")
+    else: res_macd = ("🔴 BEARISH", "Trend Turun")
+    
+    # VPVR
+    if last_row['Close'] > poc: res_vpvr = ("🟢 STRONG", "Above POC")
+    else: res_vpvr = ("🔴 WEAK", "Below POC")
+    
     # Bollinger
     if last_row['Close'] <= last_row['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
     elif last_row['Close'] >= last_row['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
 
-    # --- FIBONACCI STATUS ---
+    # >>> 🔥 FIBONACCI STATUS LOGIC 🔥 <<<
     current_price = last_row['Close']
     target_buy = fib_levels["GOLDEN POCKET (0.618)"]
     target_sell = fib_levels["RESISTANCE (High)"]
@@ -152,11 +167,12 @@ def generate_analysis_report(df, kurs, asset_name):
     else: 
         res_fib = ("🟢 BELOW", "Discount Area")
     
-    # --- DECISION LOGIC (UPDATED WITH NEAR BOTTOM) ---
     decision = "WAIT / HOLD"
     validation = "Market sideways."
     decision_tolerance = current_price * 0.002 
 
+    # >>> 🔥 DECISION LOGIC (FULL VERSION) 🔥 <<<
+    
     # 1. KONDISI NORMAL (Di atas Lantai)
     if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + decision_tolerance) and (current_price > target_floor):
         decision = "🔵 BUY / LONG"
@@ -172,6 +188,7 @@ def generate_analysis_report(df, kurs, asset_name):
         
     # 2. KONDISI NEW LOW (JEBOL LANTAI)
     elif current_price < target_floor:
+        # Cek Bear Trap (1.272)
         if (current_price <= target_trap + decision_tolerance) and (res_stoch[0] == "🟢 BULLISH" or stoch_k < 10):
              decision = "🔪 SPECULATIVE BUY (CATCH KNIFE)"
              validation = "⚠️ EXTREME: Pantulan Dead Cat Bounce di 1.272."
@@ -179,14 +196,14 @@ def generate_analysis_report(df, kurs, asset_name):
              decision = "💀 FREE FALL / WAIT"
              validation = "⛔ BAHAYA: Mencari Dasar Baru (Price Discovery)."
     
-    # >>> 🔥 FITUR BARU: WATCHLIST NEAR BOTTOM 🔥 <<<
-    # Aktif jika harga di atas Floor tapi kurang dari 1.5% jaraknya
+    # 3. 🔥 KONDISI NEAR BOTTOM (Watchlist) 🔥
+    # Jika harga di atas Floor TAPI jaraknya kurang dari 1.5%
     elif (current_price > target_floor) and (current_price <= target_floor * 1.015):
         decision = "👀 WATCHLIST: NEAR BOTTOM"
         validation = "📉 Harga mendekati Support Kuat. Pantau pantulan (Double Bottom)."
 
-    # 4. KONDISI CUT LOSS (Antara Golden Pocket dan Floor, tapi jauh dari Floor)
-    elif current_price < (target_buy - (decision_tolerance * 2)) and current_price > target_floor:
+    # 4. KONDISI CUT LOSS (Jika tidak masuk kriteria di atas)
+    elif current_price < (target_buy - (decision_tolerance * 2)):
         decision = "🛑 CUT LOSS / STOP BUY"
         validation = "⚠️ INVALID: Jebol Support Kuat."
 
@@ -219,7 +236,9 @@ def generate_analysis_report(df, kurs, asset_name):
 
 🎯 MAPPING AREA TERDEKAT
 """
+    # Menambahkan Level Bawah Tanah ke Laporan
     levels_sorted = ["MOONBAG (1.618)", "RESISTANCE (High)", "GOLDEN POCKET (0.618)", "FLOOR (Low)", "BEAR TRAP (1.272)", "CRASH BOTTOM (1.618)"]
+    
     for name in levels_sorted:
         val_usd = fib_levels[name]
         val_idr = val_usd * kurs * SPREAD_AJAIB
@@ -256,11 +275,10 @@ if __name__ == "__main__":
                 print(f"❌ Data {name} Kosong.")
                 continue
 
-            report_text, decision = generate_analysis_report(main_df, kurs_val, name)
+            report_text, decision = generate_bot_report(main_df, kurs_val, name)
             print(f"   👉 Result: {decision}")
 
-            # FILTER KIRIM TELEGRAM
-            # Tambahkan "WATCHLIST" ke daftar yang harus dikirim
+            # FILTER KIRIM TELEGRAM (DENGAN WATCHLIST)
             # if any(x in decision for x in ["BUY", "SELL", "CUT LOSS", "WATCHLIST", "FREE FALL", "SPECULATIVE"]):
             print(f"🚀 MENGIRIM ALERT {name}...")
             send_telegram(TOKEN, CHAT_ID, report_text)
