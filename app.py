@@ -91,7 +91,6 @@ def get_data_engine(ticker_code):
             main_data = df # Fallback
             
         # 🔥 LOGIKA KALIBRASI KHUSUS 🔥
-        # Kalau PAXG, pake multiplier. Kalau Crypto lain, RAW PRICE.
         if ticker_code == "PAXG-USD":
             main_data = main_data * 0.99048968
         
@@ -110,16 +109,21 @@ def get_data_engine(ticker_code):
     if kurs < 10000: kurs = 16800
     return main_data, kurs
 
+# --- FIBONACCI EXTENDED (PETA BAWAH TANAH) ---
 def calculate_fibonacci_levels(df):
     if df.empty: return {}
     high = df['High'].max()
     low = df['Low'].min()
     diff = high - low
+    
     levels = {
         "MOONBAG (1.618)": high + (diff * 0.618),
         "RESISTANCE (High)": high,
         "GOLDEN POCKET (0.618)": high - (diff * 0.618),
-        "FLOOR (Low)": low
+        "FLOOR (Low)": low,
+        # 👇 LEVEL BAHAYA BARU 👇
+        "BEAR TRAP (1.272)": high - (diff * 1.272),
+        "CRASH BOTTOM (1.618)": high - (diff * 1.618)
     }
     return levels
 
@@ -170,39 +174,56 @@ def generate_analysis_report(df, kurs, asset_name):
     elif last_row['Close'] >= last_row['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
 
-    # >>> 🔥 RESTORE FIBONACCI LOGIC 🔥 <<<
+    # >>> 🔥 FIBONACCI STATUS LOGIC (UPDATED) 🔥 <<<
     current_price = last_row['Close']
     target_buy = fib_levels["GOLDEN POCKET (0.618)"]
     target_sell = fib_levels["RESISTANCE (High)"]
+    target_floor = fib_levels["FLOOR (Low)"]
+    target_trap = fib_levels["BEAR TRAP (1.272)"]
     
-    # Toleransi dinamis (0.3% dari harga) biar cocok buat BTC/XRP/Gold
     fib_tolerance = current_price * 0.003 
     dist_to_gold = current_price - target_buy
 
-    if abs(dist_to_gold) < fib_tolerance: 
+    if current_price < target_floor:
+        res_fib = ("💀 BREAKDOWN", "New Low Detected")
+    elif abs(dist_to_gold) < fib_tolerance: 
         res_fib = ("⚠️ ALERT", "Testing Golden Pocket")
     elif dist_to_gold > 0: 
         res_fib = ("🔴 ABOVE", "Above Support")
     else: 
         res_fib = ("🟢 BELOW", "Discount Area")
-    # >>> END RESTORE <<<
     
     decision = "WAIT / HOLD"
     validation = "Market sideways."
-    
-    # LOGIKA PENGAMBILAN KEPUTUSAN (Toleransi 0.2%)
     decision_tolerance = current_price * 0.002 
 
-    if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + decision_tolerance):
+    # >>> 🔥 DECISION LOGIC (CRASH HANDLER) 🔥 <<<
+    
+    # 1. KONDISI NORMAL (Di atas Lantai)
+    if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + decision_tolerance) and (current_price > target_floor):
         decision = "🔵 BUY / LONG"
         validation = "✅ VALIDATED: Rebound Golden Pocket + Stoch Cross Up."
-    elif (res_bb[0] == "🟢 BUY ZONE") and (res_stoch[0] == "🟢 BULLISH"):
+    
+    elif (res_bb[0] == "🟢 BUY ZONE") and (res_stoch[0] == "🟢 BULLISH") and (current_price > target_floor):
         decision = "🔵 BUY / SCALP"
         validation = "✅ VALIDATED: Pantulan Lower BB + Momentum."
+        
     elif (res_stoch[0] == "🔴 BEARISH") and (current_price >= target_sell - decision_tolerance):
         decision = "🟠 SELL / TAKE PROFIT"
         validation = "✅ VALIDATED: Rejection Resistance + Stoch Cross Down."
-    elif current_price < (target_buy - (decision_tolerance * 2)):
+        
+    # 2. KONDISI NEW LOW (JEBOL LANTAI)
+    elif current_price < target_floor:
+        # Cek Bear Trap (1.272)
+        if (current_price <= target_trap + decision_tolerance) and (res_stoch[0] == "🟢 BULLISH" or stoch_k < 10):
+             decision = "🔪 SPECULATIVE BUY (CATCH KNIFE)"
+             validation = "⚠️ EXTREME: Pantulan Dead Cat Bounce di 1.272."
+        else:
+             decision = "💀 FREE FALL / WAIT"
+             validation = "⛔ BAHAYA: Mencari Dasar Baru (Price Discovery)."
+             
+    # 3. KONDISI CUT LOSS (Antara Golden Pocket dan Floor)
+    elif current_price < (target_buy - (decision_tolerance * 2)) and current_price > target_floor:
         decision = "🛑 CUT LOSS / STOP BUY"
         validation = "⚠️ INVALID: Jebol Support Kuat."
 
@@ -235,7 +256,9 @@ def generate_analysis_report(df, kurs, asset_name):
 
 🎯 MAPPING AREA TERDEKAT
 """
-    levels_sorted = ["MOONBAG (1.618)", "RESISTANCE (High)", "GOLDEN POCKET (0.618)", "FLOOR (Low)"]
+    # Menambahkan Level Bawah Tanah ke Laporan
+    levels_sorted = ["MOONBAG (1.618)", "RESISTANCE (High)", "GOLDEN POCKET (0.618)", "FLOOR (Low)", "BEAR TRAP (1.272)", "CRASH BOTTOM (1.618)"]
+    
     for name in levels_sorted:
         val_usd = fib_levels[name]
         val_idr = val_usd * kurs * SPREAD_AJAIB
@@ -247,6 +270,8 @@ def generate_analysis_report(df, kurs, asset_name):
         elif "RESISTANCE" in name: report += "\n   👉 [UJI NYALI] Breakout=Moonbag."
         elif "GOLDEN POCKET" in name: report += "\n   👉 [BUY ZONE] Mantul=Buy."
         elif "FLOOR" in name: report += "\n   👉 [BAHAYA] Pertahanan Terakhir."
+        elif "BEAR TRAP" in name: report += "\n   👉 [SEROK MAUT] Area Pantulan Panic Selling."
+        elif "CRASH BOTTOM" in name: report += "\n   👉 [KIAMAT] Dasar terdalam."
         report += "\n"
 
     return report, df, fib_levels, last_row
@@ -295,13 +320,17 @@ with st.spinner(f"Sedang Menganalisis {selected_asset_name}..."):
         st.sidebar.metric(f"{selected_asset_name.split()[0]}/USD", fmt_usd(last_row['Close']))
 
         # --- CHART ---
-        st.subheader(f"📊 Chart {selected_asset_name} + Fibonacci")
+        st.subheader(f"📊 Chart {selected_asset_name} + Fibonacci Extension")
         fig = go.Figure(data=[go.Candlestick(x=df_processed.index,
                         open=df_processed['Open'], high=df_processed['High'],
                         low=df_processed['Low'], close=df_processed['Close'],
                         name=selected_asset_name)])
         
-        colors = {"MOONBAG": "lime", "RESISTANCE": "red", "GOLDEN POCKET": "gold", "FLOOR": "white"}
+        colors = {
+            "MOONBAG": "lime", "RESISTANCE": "red", 
+            "GOLDEN POCKET": "gold", "FLOOR": "white",
+            "BEAR TRAP": "orange", "CRASH BOTTOM": "maroon" # Warna Baru
+        }
         for label, val in fib_levels.items():
             c = "gray"
             for k, v in colors.items():
