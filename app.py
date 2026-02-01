@@ -169,28 +169,40 @@ def generate_analysis_report(df, kurs, asset_name):
     if last_row['Close'] <= last_row['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
     elif last_row['Close'] >= last_row['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
-    
+
+    # >>> 🔥 RESTORE FIBONACCI LOGIC 🔥 <<<
     current_price = last_row['Close']
     target_buy = fib_levels["GOLDEN POCKET (0.618)"]
     target_sell = fib_levels["RESISTANCE (High)"]
     
+    # Toleransi dinamis (0.3% dari harga) biar cocok buat BTC/XRP/Gold
+    fib_tolerance = current_price * 0.003 
+    dist_to_gold = current_price - target_buy
+
+    if abs(dist_to_gold) < fib_tolerance: 
+        res_fib = ("⚠️ ALERT", "Testing Golden Pocket")
+    elif dist_to_gold > 0: 
+        res_fib = ("🔴 ABOVE", "Above Support")
+    else: 
+        res_fib = ("🟢 BELOW", "Discount Area")
+    # >>> END RESTORE <<<
+    
     decision = "WAIT / HOLD"
     validation = "Market sideways."
     
-    # LOGIKA PENGAMBILAN KEPUTUSAN
-    # Toleransi harga disesuaikan dengan harga aset (pakai persentase 0.2%)
-    tolerance = current_price * 0.002 
+    # LOGIKA PENGAMBILAN KEPUTUSAN (Toleransi 0.2%)
+    decision_tolerance = current_price * 0.002 
 
-    if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + tolerance):
+    if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + decision_tolerance):
         decision = "🔵 BUY / LONG"
         validation = "✅ VALIDATED: Rebound Golden Pocket + Stoch Cross Up."
     elif (res_bb[0] == "🟢 BUY ZONE") and (res_stoch[0] == "🟢 BULLISH"):
         decision = "🔵 BUY / SCALP"
         validation = "✅ VALIDATED: Pantulan Lower BB + Momentum."
-    elif (res_stoch[0] == "🔴 BEARISH") and (current_price >= target_sell - tolerance):
+    elif (res_stoch[0] == "🔴 BEARISH") and (current_price >= target_sell - decision_tolerance):
         decision = "🟠 SELL / TAKE PROFIT"
         validation = "✅ VALIDATED: Rejection Resistance + Stoch Cross Down."
-    elif current_price < (target_buy - (tolerance * 2)):
+    elif current_price < (target_buy - (decision_tolerance * 2)):
         decision = "🛑 CUT LOSS / STOP BUY"
         validation = "⚠️ INVALID: Jebol Support Kuat."
 
@@ -214,6 +226,7 @@ def generate_analysis_report(df, kurs, asset_name):
 2. MACD        [{res_macd[0]}] : {res_macd[1]}
 3. VPVR POC    [{res_vpvr[0]}] : {res_vpvr[1]} (Area ${poc:.2f})
 4. Bollinger   [{res_bb[0]}] : {res_bb[1]}
+5. Fibonacci   [{res_fib[0]}] : {res_fib[1]}
 
 ============================================================
 🧠 ENSEMBLE DECISION : [ {decision} ]
