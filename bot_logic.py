@@ -24,30 +24,29 @@ SPREAD_AJAIB = 1.015
 def fmt_idr(val): return f"Rp {val:,.0f}".replace(",", ".")
 def fmt_usd(val): return f"${val:,.2f}"
 
-# --- FUNGSI INDIKATOR MANUAL (SAMA PERSIS DENGAN APP.PY) ---
+# --- FUNGSI INDIKATOR MANUAL (COPY DARI APP.PY) ---
 def add_manual_indicators(df):
     df = df.copy()
     
-    # 1. MACD (12, 26, 9)
+    # 1. MACD
     k = df['Close'].ewm(span=12, adjust=False, min_periods=12).mean()
     d = df['Close'].ewm(span=26, adjust=False, min_periods=26).mean()
     df['MACD'] = k - d
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False, min_periods=9).mean()
     
-    # 2. Bollinger Bands (20, 2)
+    # 2. Bollinger Bands
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
-    df['BBU'] = df['SMA20'] + (df['STD20'] * 2) # Upper
-    df['BBL'] = df['SMA20'] - (df['STD20'] * 2) # Lower
+    df['BBU'] = df['SMA20'] + (df['STD20'] * 2)
+    df['BBL'] = df['SMA20'] - (df['STD20'] * 2)
     
-    # 3. Stochastic RSI (14, 14, 3, 3)
+    # 3. Stochastic RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Hitung Stoch
     min_rsi = df['RSI'].rolling(window=14).min()
     max_rsi = df['RSI'].rolling(window=14).max()
     stoch_rsi = (df['RSI'] - min_rsi) / (max_rsi - min_rsi)
@@ -86,7 +85,7 @@ def get_data_engine(ticker_code):
         print(f"❌ Error fetching {ticker_code}: {e}")
         return pd.DataFrame(), 16800
 
-def calculate_fib_levels(df):
+def calculate_fibonacci_levels(df):
     if df.empty: return {}
     high = df['High'].max()
     low = df['Low'].min()
@@ -106,85 +105,122 @@ def send_telegram(token, chat_id, message):
     except Exception as e:
         print(f"❌ Gagal Kirim: {e}")
 
-# --- ANALISA PER ASET ---
-def analyze_one_asset(asset_name, ticker):
-    print(f"🔍 Analyzing {asset_name}...")
-    
-    df, kurs = get_data_engine(ticker)
-    if df.empty: return None, "ERROR"
+# --- ANALISA & GENERATE REPORT (LOGIC DARI APP.PY) ---
+def generate_analysis_report(df, kurs, asset_name):
+    if df.empty: return None, "WAIT / HOLD"
 
-    # Hitung Indikator
+    # Analisa Indikator
     df = add_manual_indicators(df)
-    fib_levels = calculate_fib_levels(df)
     
-    # Ambil Data Terakhir
-    last = df.iloc[-1]
+    # VPVR Logic
+    price_bins = pd.cut(df['Close'], bins=50)
+    vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
+    poc = vpvr.idxmax().mid
     
-    # --- LOGIKA INDIKATOR ---
-    # Stoch RSI
-    stoch_k = last['STOCHRSIk']
-    stoch_d = last['STOCHRSId']
+    fib_levels = calculate_fibonacci_levels(df)
+    last_row = df.iloc[-1]
+    
+    # Indikator Status
+    stoch_k = last_row['STOCHRSIk']
+    stoch_d = last_row['STOCHRSId']
+    
     if stoch_k < 20 and stoch_k > stoch_d: res_stoch = ("🟢 BULLISH", "Golden Cross")
     elif stoch_k > 80 and stoch_k < stoch_d: res_stoch = ("🔴 BEARISH", "Death Cross")
     elif stoch_k < 20: res_stoch = ("⚪ WAIT", "Oversold")
     else: res_stoch = ("⚪ NEUTRAL", f"{stoch_k:.1f}")
     
+    # MACD
+    if last_row['MACD'] > last_row['MACD_Signal']: res_macd = ("🟢 BULLISH", "Trend Naik")
+    else: res_macd = ("🔴 BEARISH", "Trend Turun")
+    
+    # VPVR
+    if last_row['Close'] > poc: res_vpvr = ("🟢 STRONG", "Above POC")
+    else: res_vpvr = ("🔴 WEAK", "Below POC")
+    
     # Bollinger
-    if last['Close'] <= last['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
-    elif last['Close'] >= last['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
+    if last_row['Close'] <= last_row['BBL']: res_bb = ("🟢 BUY ZONE", "Lower Band")
+    elif last_row['Close'] >= last_row['BBU']: res_bb = ("🔴 SELL ZONE", "Upper Band")
     else: res_bb = ("⚪ INSIDE", "Normal")
-    
-    # VPVR (Simple POC Estimation)
-    price_bins = pd.cut(df['Close'], bins=50)
-    vpvr = df.groupby(price_bins, observed=True)['Volume'].sum()
-    poc = vpvr.idxmax().mid
-    
-    # --- LOGIKA FIBONACCI (RESTORED) ---
-    current_price = last['Close']
+
+    # >>> 🔥 RESTORE FIBONACCI LOGIC 🔥 <<<
+    current_price = last_row['Close']
     target_buy = fib_levels["GOLDEN POCKET (0.618)"]
     target_sell = fib_levels["RESISTANCE (High)"]
     
-    fib_tolerance = current_price * 0.003 # 0.3% Toleransi visual
+    # Toleransi dinamis (0.3% dari harga) biar cocok buat BTC/XRP/Gold
+    fib_tolerance = current_price * 0.003 
     dist_to_gold = current_price - target_buy
 
-    if abs(dist_to_gold) < fib_tolerance: res_fib = ("⚠️ ALERT", "Testing Golden Pocket")
-    elif dist_to_gold > 0: res_fib = ("🔴 ABOVE", "Above Support")
-    else: res_fib = ("🟢 BELOW", "Discount Area")
-
-    # --- LOGIKA DECISION ---
+    if abs(dist_to_gold) < fib_tolerance: 
+        res_fib = ("⚠️ ALERT", "Testing Golden Pocket")
+    elif dist_to_gold > 0: 
+        res_fib = ("🔴 ABOVE", "Above Support")
+    else: 
+        res_fib = ("🟢 BELOW", "Discount Area")
+    # >>> END RESTORE <<<
+    
     decision = "WAIT / HOLD"
-    decision_tolerance = current_price * 0.002 # 0.2% Toleransi Sinyal
+    validation = "Market sideways."
+    
+    # LOGIKA PENGAMBILAN KEPUTUSAN (Toleransi 0.2%)
+    decision_tolerance = current_price * 0.002 
 
     if (res_stoch[0] == "🟢 BULLISH") and (current_price <= target_buy + decision_tolerance):
         decision = "🔵 BUY / LONG"
+        validation = "✅ VALIDATED: Rebound Golden Pocket + Stoch Cross Up."
     elif (res_bb[0] == "🟢 BUY ZONE") and (res_stoch[0] == "🟢 BULLISH"):
         decision = "🔵 BUY / SCALP"
+        validation = "✅ VALIDATED: Pantulan Lower BB + Momentum."
     elif (res_stoch[0] == "🔴 BEARISH") and (current_price >= target_sell - decision_tolerance):
         decision = "🟠 SELL / TAKE PROFIT"
+        validation = "✅ VALIDATED: Rejection Resistance + Stoch Cross Down."
     elif current_price < (target_buy - (decision_tolerance * 2)):
         decision = "🛑 CUT LOSS / STOP BUY"
+        validation = "⚠️ INVALID: Jebol Support Kuat."
 
-    # --- BUILD REPORT (Hanya jika sinyal penting) ---
     now = datetime.now(pytz.timezone('Asia/Jakarta'))
     
-    report = f"""🦅 {asset_name} ALERT
-📅 {now.strftime('%H:%M WIB')}
-========================
-🎯 DECISION: {decision}
-========================
-💎 USD: {fmt_usd(current_price)}
-🇮🇩 IDR: {fmt_idr(current_price * kurs * SPREAD_AJAIB)}
+    # REPORT GENERATOR (FORMAT SAMA PERSIS APP.PY)
+    report = f"""🦅 {asset_name} SNIPER AUTOMATION
+📅 Waktu: {now.strftime('%d %b %Y | %H:%M WIB')}
+============================================================
 
-📊 Indikator:
-1. Stoch: {res_stoch[0]} ({res_stoch[1]})
-2. BB: {res_bb[0]}
-3. Fib Status: {res_fib[0]} ({res_fib[1]})
-4. POC Area: ${poc:.2f}
+💰 UPDATE HARGA ({asset_name})
+💵 KURS USD/IDR : {fmt_idr(kurs)}
+------------------------------------------------------------
+💎 PRICE USD     : {fmt_usd(current_price)}
+💎 PRICE IDR     : {fmt_idr(current_price * kurs)}
+   *(Est. Exchange Lokal: {fmt_idr(current_price * kurs * SPREAD_AJAIB)})*
+------------------------------------------------------------
 
-📍 Mapping Area:
-• Sell: {fmt_usd(target_sell)}
-• Buy: {fmt_usd(target_buy)}
+📊 HASIL ANALISIS (5 METODE)
+1. Stoch RSI   [{res_stoch[0]}] : {res_stoch[1]}
+2. MACD        [{res_macd[0]}] : {res_macd[1]}
+3. VPVR POC    [{res_vpvr[0]}] : {res_vpvr[1]} (Area ${poc:.2f})
+4. Bollinger   [{res_bb[0]}] : {res_bb[1]}
+5. Fibonacci   [{res_fib[0]}] : {res_fib[1]}
+
+============================================================
+🧠 ENSEMBLE DECISION : [ {decision} ]
+🔐 VALIDATED BY      : {validation}
+============================================================
+
+🎯 MAPPING AREA TERDEKAT
 """
+    levels_sorted = ["MOONBAG (1.618)", "RESISTANCE (High)", "GOLDEN POCKET (0.618)", "FLOOR (Low)"]
+    for name in levels_sorted:
+        val_usd = fib_levels[name]
+        val_idr = val_usd * kurs * SPREAD_AJAIB
+        report += f"\n📍 LEVEL: {name}"
+        report += f"\n   • USD : {fmt_usd(val_usd)}"
+        report += f"\n   • IDR : {fmt_idr(val_idr)}"
+        
+        if "MOONBAG" in name: report += "\n   👉 [TARGET] TP 2 / Jual Semua."
+        elif "RESISTANCE" in name: report += "\n   👉 [UJI NYALI] Breakout=Moonbag."
+        elif "GOLDEN POCKET" in name: report += "\n   👉 [BUY ZONE] Mantul=Buy."
+        elif "FLOOR" in name: report += "\n   👉 [BAHAYA] Pertahanan Terakhir."
+        report += "\n"
+
     return report, decision
 
 # --- MAIN LOOP ---
@@ -200,21 +236,25 @@ if __name__ == "__main__":
     # Loop semua aset di daftar
     for name, ticker in ASSETS.items():
         try:
-            report_text, status = analyze_one_asset(name, ticker)
+            print(f"🔍 Analyzing {name}...")
+            main_df, kurs_val = get_data_engine(ticker)
             
-            if status == "ERROR":
+            if main_df.empty:
+                print(f"❌ Data {name} Kosong.")
                 continue
-                
-            print(f"   👉 {name}: {status}")
 
-            # Filter Kirim Telegram
-            # Cuma kirim kalau BUY, SELL, CUT LOSS, atau ALERT Fibonacci
-            if "BUY" in status or "SELL" in status or "CUT LOSS" in status or "ALERT" in report_text:
-                print(f"🚀 MENGIRIM ALERT {name}...")
-                send_telegram(TOKEN, CHAT_ID, report_text)
-                time.sleep(2) # Jeda biar ga spamming
-            else:
-                pass # Sideways, diem aja
+            report_text, decision = generate_analysis_report(main_df, kurs_val, name)
+            
+            print(f"   👉 Result: {decision}")
+
+            # Filter Kirim Telegram (Cuma Kirim Jika Penting)
+            # Kalau mau debug kirim semua, hapus if-nya.
+            # if "BUY" in decision or "SELL" in decision or "CUT LOSS" in decision:
+            print(f"🚀 MENGIRIM ALERT {name}...")
+            send_telegram(TOKEN, CHAT_ID, report_text)
+            time.sleep(2) # Jeda biar ga spamming
+            # else:
+            #     pass # Sideways, diem aja
                 
         except Exception as e:
             print(f"❌ Error pada {name}: {e}")
