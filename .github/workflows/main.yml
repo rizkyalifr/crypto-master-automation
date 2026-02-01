@@ -1,0 +1,40 @@
+name: Market Sniper Bot
+
+on:
+  # 1. Jadwal Otomatis (Cron Job)
+  schedule:
+    # Jalan tiap 4 jam (Jam 00, 04, 08, 12, 16, 20 UTC)
+    # Note: UTC+0 berarti di Indo (WIB) itu jam 07, 11, 15, 19, 23, 03
+    - cron: '0 */1 * * *'
+  
+  # 2. Tombol Manual (Buat Test Run)
+  workflow_dispatch:
+
+jobs:
+  run-sniper:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Langkah 1: Ambil kodingan dari Repo lu
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # Langkah 2: Install Python 3.10 (Versi Stabil)
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # Langkah 3: Install Library dari requirements.txt
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Langkah 4: Jalanin Otak Robotnya
+      - name: Run Bot Logic
+        env:
+          # Ini ngambil kunci rahasia dari Settings -> Secrets
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot_logic.py
